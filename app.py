@@ -1,45 +1,38 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-import os
-from datetime import datetime
+from datetime import datetime, date
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Lucros - Gabriel", layout="wide", page_icon="💰")
 
-# --- BANCO DE DADOS LOCAL (SIMPLES E DIRETO) ---
 DB_FILE = "dados_sistema.db"
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Tabela de Usuários
     c.execute('''CREATE TABLE IF NOT EXISTS usuarios 
                  (nome TEXT, cpf TEXT PRIMARY KEY, empresa TEXT, cnpj TEXT, senha TEXT, tipo TEXT)''')
-    # Tabela de Lançamentos
     c.execute('''CREATE TABLE IF NOT EXISTS lancamentos 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, cpf_socio TEXT, data TEXT, valor REAL, banco TEXT)''')
-    # Tabela de Bancos
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, cpf_socio TEXT, data DATE, valor REAL, banco TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS bancos (nome_banco TEXT PRIMARY KEY)''')
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- FUNÇÕES DE ACESSO ---
 def run_query(query, params=(), fetch=False):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute(query, params)
-        if fetch:
-            return cursor.fetchall()
+        if fetch: return cursor.fetchall()
         conn.commit()
 
 # --- LÓGICA DE SESSÃO ---
 if 'logado' not in st.session_state:
     st.session_state.update({'logado': False, 'user_type': None, 'user_cpf': None})
 
-# --- INTERFACE ---
+# --- TELAS ---
 if not st.session_state.logado:
     st.title("🏦 Sistema de Distribuição de Lucros")
     t_login, t_cad = st.tabs(["Acessar", "Novo Cadastro"])
@@ -63,56 +56,63 @@ if not st.session_state.logado:
         with st.form("form_cad"):
             n = st.text_input("Nome")
             c = st.text_input("CPF")
-            e = st.text_input("Empresa")
+            e = st.text_input("Razão Social")
             cj = st.text_input("CNPJ")
             s = st.text_input("Senha", type="password")
             if st.form_submit_button("Finalizar Cadastro"):
                 try:
                     run_query("INSERT INTO usuarios VALUES (?,?,?,?,?,?)", (n, c, e, cj, s, 'socio'))
                     st.success("Cadastrado! Vá para a aba de Login.")
-                except:
-                    st.error("Erro: CPF já cadastrado.")
+                except: st.error("Erro: CPF já cadastrado.")
 
 elif st.session_state.user_type == "admin":
+    # --- ÁREA ADM (GABRIEL) ---
     st.sidebar.button("Sair", on_click=lambda: st.session_state.update({'logado': False}))
-    st.header("📊 Painel ADM - Gabriel")
+    st.header("📊 Painel Geral de Retiradas")
     
-    # Query de Relatório
-    df_res = pd.read_sql_query("""
-        SELECT u.nome, u.empresa, l.data, l.valor, l.banco 
-        FROM lancamentos l JOIN usuarios u ON l.cpf_socio = u.cpf
-    """, sqlite3.connect(DB_FILE))
-    
-    if not df_res.empty:
-        st.dataframe(df_res, use_container_width=True)
-        st.metric("Total Acumulado", f"R$ {df_res['valor'].sum():,.2f}")
-    else:
-        st.info("Nenhum lançamento registrado.")
+    # Busca dados completos para o ADM
+    query_adm = """
+        SELECT u.cpf, u.cnpj, u.nome, u.empresa, l.data, l.valor, l.banco 
+        FROM lancamentos l 
+        JOIN usuarios u ON l.cpf_socio = u.cpf
+    """
+    df_adm = pd.read_sql_query(query_adm, sqlite3.connect(DB_FILE))
+    df_adm['data'] = pd.to_datetime(df_adm['data']).dt.date
 
-    st.divider()
-    st.subheader("🔐 Gestão de Sócios")
-    df_u = pd.read_sql_query("SELECT nome, cpf FROM usuarios", sqlite3.connect(DB_FILE))
-    if not df_u.empty:
-        u_sel = st.selectbox("Sócio:", df_u['nome'].tolist())
-        if st.button("Resetar Senha para abcd1234"):
-            run_query("UPDATE usuarios SET senha='abcd1234' WHERE nome=?", (u_sel,))
-            st.success(f"Senha de {u_sel} resetada!")
+    # --- FILTROS ADM ---
+    with st.expander("🔍 Filtros de Relatório", expanded=True):
+        col1, col2, col3 = st.columns(3)
+        f_cpf = col1.text_input("Filtrar por CPF")
+        f_cnpj = col2.text_input("Filtrar por CNPJ")
+        
+        periodo = col3.date_input("Período", [date.today().replace(day=1), date.today()])
+
+    # Aplicação dos Filtros
+    if f_cpf: df_adm = df_adm[df_adm['cpf'].str.contains(f_cpf)]
+    if f_cnpj: df_adm = df_adm[df_cnpj.str.contains(f_cnpj)]
+    if len(periodo) == 2:
+        df_adm = df_adm[(df_adm['data'] >= periodo[0]) & (df_adm['data'] <= periodo[1])]
+
+    # Exibição ADM
+    st.dataframe(df_adm, use_container_width=True)
+    st.metric("Total Distribuído no Período", f"R$ {df_adm['valor'].sum():,.2f}")
 
 else:
     # --- ÁREA DO SÓCIO ---
     st.sidebar.button("Sair", on_click=lambda: st.session_state.update({'logado': False}))
-    st.header("💸 Registrar Retirada")
+    st.header("💸 Lançar Retirada")
     
     bancos_db = run_query("SELECT nome_banco FROM bancos", fetch=True)
     lista_bancos = ["Novo..."] + [b[0] for b in bancos_db]
     
-    with st.form("form_ret"):
-        dt = st.date_input("Data", datetime.now())
-        vl = st.number_input("Valor", min_value=0.0)
-        b_sel = st.selectbox("Banco PJ", lista_bancos)
-        b_new = st.text_input("Se novo, qual?")
+    with st.form("form_ret", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        dt = c1.date_input("Data do Recebimento", date.today())
+        vl = c2.number_input("Valor (R$)", min_value=0.0)
+        b_sel = c1.selectbox("Banco PJ de Origem", lista_bancos)
+        b_new = c2.text_input("Se novo, digite o nome")
         
-        if st.form_submit_button("Lançar"):
+        if st.form_submit_button("Registrar Retirada"):
             final_b = b_new.upper() if b_sel == "Novo..." else b_sel
             if final_b and vl > 0:
                 if b_sel == "Novo...":
@@ -120,5 +120,18 @@ else:
                     except: pass
                 
                 run_query("INSERT INTO lancamentos (cpf_socio, data, valor, banco) VALUES (?,?,?,?)",
-                          (st.session_state.user_cpf, dt.strftime("%d/%m/%Y"), vl, final_b))
-                st.success("Lançado com sucesso!")
+                          (st.session_state.user_cpf, dt.isoformat(), vl, final_b))
+                st.success("Lançamento realizado!")
+                st.rerun()
+
+    st.divider()
+    st.subheader("📜 Meus Lançamentos Realizados")
+    # Busca apenas os lançamentos deste sócio
+    query_socio = "SELECT data, valor, banco FROM lancamentos WHERE cpf_socio=? ORDER BY data DESC"
+    df_socio = pd.read_sql_query(query_socio, sqlite3.connect(DB_FILE), params=(st.session_state.user_cpf,))
+    if not df_socio.empty:
+        df_socio['data'] = pd.to_datetime(df_socio['data']).dt.strftime('%d/%m/%Y')
+        st.table(df_socio)
+        st.metric("Minha Retirada Total", f"R$ {df_socio['valor'].sum():,.2f}")
+    else:
+        st.info("Você ainda não possui lançamentos registrados.")
