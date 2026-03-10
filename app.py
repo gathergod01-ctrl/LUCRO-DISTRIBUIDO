@@ -7,7 +7,7 @@ from datetime import datetime, date
 st.set_page_config(page_title="Gestão de Lucros - Gabriel", layout="wide", page_icon="💰")
 
 DB_FILE = "dados_sistema.db"
-BANCOS_PADRAO = ["001 - BANCO DO BRASIL", "033 - SANTANDER", "104 - CAIXA ECONOMICA", "237 - BRADESCO", "341 - ITAU", "077 - INTER", "260 - NUBANK", "336 - C6 BANK", "OUTRO"]
+BANCOS_PADRAO = ["001 - BANCO DO BRASIL", "033 - SANTANDER", "104 - CAIXA ECONOMICA", "237 - BRADESCO", "341 - ITAU", "077 - INTER", "260 - NUBANK", "336 - C6 BANK"]
 
 def init_db():
     with sqlite3.connect(DB_FILE) as conn:
@@ -29,10 +29,8 @@ def run_query(query, params=(), fetch=False):
 def safe_parse_date(date_str):
     if not date_str: return date.today()
     for fmt in ('%d/%m/%Y', '%Y-%m-%d', '%Y/%m/%d'):
-        try:
-            return datetime.strptime(str(date_str), fmt).date()
-        except (ValueError, TypeError):
-            continue
+        try: return datetime.strptime(str(date_str), fmt).date()
+        except: continue
     return date.today()
 
 if 'logado' not in st.session_state:
@@ -47,7 +45,6 @@ if not st.session_state.logado:
         u_in = st.text_input("Usuário")
         p_in = st.text_input("Senha", type="password")
         if st.button("Entrar"):
-            # Lógica Automática para o ADM Gabriel
             if u_in == "GABRIEL" and p_in == "@Lopes2019":
                 st.session_state.update({'logado': True, 'user_type': 'admin', 'user_cpf': 'ADM'})
                 st.rerun()
@@ -75,91 +72,118 @@ if not st.session_state.logado:
 elif st.session_state.user_type == "admin":
     # --- PAINEL GABRIEL (ADM) ---
     st.sidebar.button("Sair", on_click=lambda: st.session_state.update({'logado': False}))
-    st.header("📊 Painel Administrativo - Visão Geral")
+    st.header("📊 Painel Administrativo")
     
-    df_adm = pd.read_sql_query("""
-        SELECT u.cpf, u.cnpj, u.nome, u.empresa, l.data, l.valor, l.banco 
-        FROM lancamentos l JOIN usuarios u ON l.cpf_socio = u.cpf
-    """, sqlite3.connect(DB_FILE))
+    tab_rel, tab_bc = st.tabs(["Relatório Consolidado", "Gestão de Bancos"])
     
-    if not df_adm.empty:
-        df_adm['data_obj'] = df_adm['data'].apply(safe_parse_date)
-        
-        with st.expander("🔍 Filtros de Relatório", expanded=True):
-            c1, c2, c3 = st.columns(3)
-            f_cpf = c1.text_input("Filtrar CPF")
-            f_cnpj = c2.text_input("Filtrar CNPJ")
-            periodo = c3.date_input("Período", [date.today().replace(day=1), date.today()])
+    with tab_rel:
+        df_adm = pd.read_sql_query("SELECT u.cpf, u.cnpj, u.nome, u.empresa, l.data, l.valor, l.banco FROM lancamentos l JOIN usuarios u ON l.cpf_socio = u.cpf", sqlite3.connect(DB_FILE))
+        if not df_adm.empty:
+            df_adm['data_obj'] = df_adm['data'].apply(safe_parse_date)
+            with st.expander("🔍 Filtros", expanded=True):
+                c1, c2, c3 = st.columns(3)
+                f_cpf = c1.text_input("CPF")
+                f_cnpj = c2.text_input("CNPJ")
+                periodo = c3.date_input("Período", [date.today().replace(day=1), date.today()])
+            
+            if f_cpf: df_adm = df_adm[df_adm['cpf'].astype(str).str.contains(f_cpf)]
+            if f_cnpj: df_adm = df_adm[df_adm['cnpj'].astype(str).str.contains(f_cnpj)]
+            if len(periodo) == 2:
+                df_adm = df_adm[(df_adm['data_obj'] >= periodo[0]) & (df_adm['data_obj'] <= periodo[1])]
+            
+            st.dataframe(df_adm[['cpf', 'cnpj', 'nome', 'empresa', 'data', 'valor', 'banco']], use_container_width=True)
+            
+            c_res1, c_res2 = st.columns([2, 1])
+            c_res1.metric("Total Distribuído", f"R$ {df_adm['valor'].sum():,.2f}")
+            csv = df_adm.to_csv(index=False).encode('utf-8')
+            c_res2.download_button("📥 Exportar CSV", csv, "relatorio.csv", "text/csv")
+        else: st.info("Sem dados.")
 
-        if f_cpf: df_adm = df_adm[df_adm['cpf'].astype(str).str.contains(f_cpf)]
-        if f_cnpj: df_adm = df_adm[df_adm['cnpj'].astype(str).str.contains(f_cnpj)]
-        if len(periodo) == 2:
-            df_adm = df_adm[(df_adm['data_obj'] >= periodo[0]) & (df_adm['data_obj'] <= periodo[1])]
-
-        st.dataframe(df_adm[['cpf', 'cnpj', 'nome', 'empresa', 'data', 'valor', 'banco']], use_container_width=True)
+    with tab_bc:
+        st.subheader("Configuração de Bancos")
+        nb = st.text_input("Novo banco: digite o nome do novo banco:")
+        if st.button("➕ Adicionar Banco"):
+            if nb:
+                run_query("INSERT OR IGNORE INTO bancos_custom VALUES (?)", (nb.upper().strip(),))
+                st.rerun()
         
-        col_res1, col_res2 = st.columns([2, 1])
-        col_res1.metric("Total Distribuído no Período", f"R$ {df_adm['valor'].sum():,.2f}")
-        
-        # --- BOTÃO DE EXPORTAÇÃO CSV ---
-        csv = df_adm[['cpf', 'cnpj', 'nome', 'empresa', 'data', 'valor', 'banco']].to_csv(index=False).encode('utf-8')
-        col_res2.download_button(
-            label="📥 Exportar Relatório (CSV)",
-            data=csv,
-            file_name=f"relatorio_lucros_{date.today()}.csv",
-            mime='text/csv',
-        )
-    else: st.info("Nenhum dado encontrado.")
+        st.divider()
+        b_c = [b[0] for b in run_query("SELECT nome_banco FROM bancos_custom", fetch=True)]
+        if b_c:
+            ex = st.selectbox("Excluir banco: selecione o nome:", ["Selecione..."] + b_c)
+            if st.button("❌ Excluir Banco"):
+                run_query("DELETE FROM bancos_custom WHERE nome_banco=?", (ex,))
+                st.rerun()
 
 else:
     # --- PAINEL DO SÓCIO ---
     st.sidebar.button("Sair", on_click=lambda: st.session_state.update({'logado': False}))
-    st.header("💸 Central do Sócio")
+    st.header("💸 Área do Sócio")
     
-    tab_novo, tab_filtro, tab_edicao = st.tabs(["Novo Lançamento", "🔍 Consultar por Período", "⚙️ Editar/Excluir"])
+    t_lan, t_banco, t_cons, t_edit = st.tabs(["Lançamento", "🏦 Cadastrar Banco", "🔍 Consultar", "⚙️ Editar"])
     
-    with tab_novo:
-        bancos_db = [b[0] for b in run_query("SELECT nome_banco FROM bancos_custom", fetch=True)]
-        lista_bancos = sorted(list(set(BANCOS_PADRAO + bancos_db)))
-        with st.form("form_novo", clear_on_submit=True):
-            col1, col2 = st.columns(2)
-            data_l = col1.date_input("Data", date.today())
-            valor_l = col2.number_input("Valor", min_value=0.0)
-            b_sel = st.selectbox("Banco", lista_bancos)
-            b_txt = st.text_input("Novo Banco?")
-            if st.form_submit_button("Registrar"):
-                final_b = b_txt.upper() if b_sel == "OUTRO" else b_sel
-                if b_sel == "OUTRO": run_query("INSERT OR IGNORE INTO bancos_custom VALUES (?)", (final_b,))
-                run_query("INSERT INTO lancamentos (cpf_socio, data, valor, banco) VALUES (?,?,?,?)", 
-                          (st.session_state.user_cpf, data_l.strftime('%d/%m/%Y'), valor_l, final_b))
-                st.success("Lançado!")
+    # 1. ABA: CADASTRO DE BANCO (PRIMEIRO PASSO)
+    with t_banco:
+        st.subheader("Gestão de Bancos")
+        col_nb1, col_nb2 = st.columns([3, 1])
+        novo_b = col_nb1.text_input("Novo banco: digite o nome do novo banco:")
+        if col_nb2.button("➕ Adicionar"):
+            if novo_b:
+                run_query("INSERT OR IGNORE INTO bancos_custom VALUES (?)", (novo_b.upper().strip(),))
+                st.success("Banco cadastrado!")
+                st.rerun()
+        
+        st.divider()
+        lista_c = [b[0] for b in run_query("SELECT nome_banco FROM bancos_custom", fetch=True)]
+        if lista_c:
+            col_eb1, col_eb2 = st.columns([3, 1])
+            excluir_b = col_eb1.selectbox("Excluir banco: selecione o nome:", ["Selecione..."] + lista_c)
+            if col_eb2.button("❌ Excluir"):
+                run_query("DELETE FROM bancos_custom WHERE nome_banco=?", (excluir_b,))
                 st.rerun()
 
-    with tab_filtro:
-        df_f = pd.read_sql_query("SELECT data, valor, banco FROM lancamentos WHERE cpf_socio=?", 
-                                 sqlite3.connect(DB_FILE), params=(st.session_state.user_cpf,))
-        if not df_f.empty:
-            df_f['data_obj'] = df_f['data'].apply(safe_parse_date)
-            p_socio = st.date_input("Intervalo", [date.today().replace(day=1), date.today()], key="p_socio")
-            if len(p_socio) == 2:
-                df_filtrado = df_f[(df_f['data_obj'] >= p_socio[0]) & (df_f['data_obj'] <= p_socio[1])]
-                st.metric("Total no Período", f"R$ {df_filtrado['valor'].sum():,.2f}")
-                st.table(df_filtrado[['data', 'valor', 'banco']])
-        else: st.info("Sem lançamentos.")
+    # 2. ABA: LANÇAMENTO
+    with t_lan:
+        b_db = [b[0] for b in run_query("SELECT nome_banco FROM bancos_custom", fetch=True)]
+        final_list = sorted(list(set(BANCOS_PADRAO + b_db)))
+        
+        with st.form("f_lan", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            d_l = c1.date_input("Data do Recebimento", date.today())
+            v_l = c2.number_input("Valor (R$)", min_value=0.0)
+            b_pg = st.selectbox("Banco que Efetuou o pagamento", final_list)
+            if st.form_submit_button("Confirmar Lançamento"):
+                if v_l > 0:
+                    run_query("INSERT INTO lancamentos (cpf_socio, data, valor, banco) VALUES (?,?,?,?)", 
+                              (st.session_state.user_cpf, d_l.strftime('%d/%m/%Y'), v_l, b_pg))
+                    st.success("Registrado com sucesso!")
+                else: st.warning("Informe um valor válido.")
 
-    with tab_edicao:
-        df_edit = pd.read_sql_query("SELECT id, data, valor, banco FROM lancamentos WHERE cpf_socio=?", 
-                                    sqlite3.connect(DB_FILE), params=(st.session_state.user_cpf,))
-        for _, row in df_edit.iterrows():
-            with st.expander(f"Lançamento: {row['data']} - R$ {row['valor']}"):
-                c1, c2, c3 = st.columns(3)
-                n_dt = c1.date_input("Data", safe_parse_date(row['data']), key=f"e_dt_{row['id']}")
-                n_vl = c2.number_input("Valor", value=float(row['valor']), key=f"e_vl_{row['id']}")
-                n_bc = c3.text_input("Banco", value=str(row['banco']), key=f"e_bc_{row['id']}")
-                if st.button("Salvar", key=f"s_{row['id']}"):
-                    run_query("UPDATE lancamentos SET data=?, valor=?, banco=? WHERE id=?", 
-                              (n_dt.strftime('%d/%m/%Y'), n_vl, n_bc.upper(), row['id']))
+    # 3. ABA: CONSULTA (SOMATÓRIO POR PERÍODO)
+    with t_cons:
+        df_c = pd.read_sql_query("SELECT data, valor, banco FROM lancamentos WHERE cpf_socio=?", 
+                                 sqlite3.connect(DB_FILE), params=(st.session_state.user_cpf,))
+        if not df_c.empty:
+            df_c['data_obj'] = df_c['data'].apply(safe_parse_date)
+            p_s = st.date_input("Filtrar período para somar:", [date.today().replace(day=1), date.today()])
+            if len(p_s) == 2:
+                df_fil = df_c[(df_c['data_obj'] >= p_s[0]) & (df_c['data_obj'] <= p_s[1])]
+                st.metric("Total de Distribuições no Período", f"R$ {df_fil['valor'].sum():,.2f}")
+                st.table(df_fil[['data', 'valor', 'banco']])
+
+    # 4. ABA: EDIÇÃO/EXCLUSÃO
+    with t_edit:
+        df_e = pd.read_sql_query("SELECT id, data, valor, banco FROM lancamentos WHERE cpf_socio=?", 
+                                 sqlite3.connect(DB_FILE), params=(st.session_state.user_cpf,))
+        for _, r in df_e.iterrows():
+            with st.expander(f"Registro {r['data']} - R$ {r['valor']}"):
+                nc1, nc2, nc3 = st.columns(3)
+                edt = nc1.date_input("Nova Data", safe_parse_date(r['data']), key=f"d{r['id']}")
+                evl = nc2.number_input("Novo Valor", value=float(r['valor']), key=f"v{r['id']}")
+                ebc = nc3.selectbox("Novo Banco", final_list, index=final_list.index(r['banco']) if r['banco'] in final_list else 0, key=f"b{r['id']}")
+                if st.button("Salvar Alteração", key=f"s{r['id']}"):
+                    run_query("UPDATE lancamentos SET data=?, valor=?, banco=? WHERE id=?", (edt.strftime('%d/%m/%Y'), evl, ebc, r['id']))
                     st.rerun()
-                if st.button("Excluir", key=f"d_{row['id']}"):
-                    run_query("DELETE FROM lancamentos WHERE id=?", (row['id'],))
+                if st.button("Excluir Lançamento", key=f"x{r['id']}"):
+                    run_query("DELETE FROM lancamentos WHERE id=?", (r['id'],))
                     st.rerun()
