@@ -6,21 +6,32 @@ from datetime import datetime
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Lucros - Gabriel", layout="wide", page_icon="💰")
 
-# Customização de Layout (CSS)
 st.markdown("""
     <style>
     .main { background-color: #f0f2f6; }
     .stButton>button { width: 100%; border-radius: 8px; background-color: #0047AB; color: white; font-weight: bold; }
-    h1 { color: #0047AB; }
     </style>
     """, unsafe_allow_html=True)
 
 # --- CONEXÃO COM GOOGLE SHEETS ---
-# Certifique-se de configurar o arquivo .streamlit/secrets.toml com a URL da sua planilha
-conn = st.connection("gsheets", type=GSheetsConnection)
+try:
+    conn = st.connection("gsheets", type=GSheetsConnection)
+except Exception as e:
+    st.error("Erro ao conectar com o Google Sheets. Verifique os Secrets.")
+    st.stop()
 
-def get_data(worksheet):
-    return conn.read(worksheet=worksheet, ttl=0)
+def get_data(worksheet_name):
+    try:
+        # ttl=0 evita cache para dados financeiros
+        return conn.read(worksheet=worksheet_name, ttl=0)
+    except Exception:
+        # Cria dataframe vazio com colunas caso a aba não exista ou esteja inacessível
+        cols = {
+            "usuarios": ["nome", "cpf", "empresa", "cnpj", "senha", "tipo"],
+            "lancamentos": ["cpf_socio", "data", "valor", "banco"],
+            "bancos": ["nome_banco"]
+        }
+        return pd.DataFrame(columns=cols.get(worksheet_name, []))
 
 # --- LÓGICA DE SESSÃO ---
 if 'logado' not in st.session_state:
@@ -32,102 +43,102 @@ if 'logado' not in st.session_state:
 
 if not st.session_state.logado:
     st.title("🏦 Sistema de Distribuição de Lucros")
-    tab_login, tab_cad = st.tabs(["Acessar Sistema", "Novo Cadastro de Sócio"])
+    tab_login, tab_cad = st.tabs(["Acessar", "Novo Sócio"])
 
     with tab_login:
-        user_input = st.text_input("Usuário (CPF ou Nome ADM)")
-        pass_input = st.text_input("Senha", type="password")
+        user_in = st.text_input("Usuário (CPF ou Nome ADM)")
+        pass_in = st.text_input("Senha", type="password")
+        
         if st.button("Entrar"):
-            # Verificação ADM (Gabriel Lopes)
-            if user_input.upper() == "GABRIEL" and pass_input == "@Lopes2019":
+            if user_in.upper() == "GABRIEL" and pass_in == "@Lopes2019":
                 st.session_state.logado = True
                 st.session_state.user_type = "admin"
                 st.rerun()
             else:
-                # Busca na aba de usuários da planilha
-                df_users = get_data("usuarios")
-                user = df_users[(df_users['cpf'] == user_input) & (df_users['senha'] == pass_input)]
-                if not user.empty:
-                    st.session_state.logado = True
-                    st.session_state.user_type = "socio"
-                    st.session_state.user_cpf = user_input
-                    st.rerun()
-                else:
-                    st.error("Credenciais inválidas.")
+                df_u = get_data("usuarios")
+                if not df_u.empty:
+                    # Garantindo que CPF e Senha sejam comparados como strings
+                    df_u['cpf'] = df_u['cpf'].astype(str)
+                    df_u['senha'] = df_u['senha'].astype(str)
+                    user_match = df_u[(df_u['cpf'] == user_in) & (df_u['senha'] == pass_in)]
+                    
+                    if not user_match.empty:
+                        st.session_state.logado = True
+                        st.session_state.user_type = "socio"
+                        st.session_state.user_cpf = user_in
+                        st.rerun()
+                    else:
+                        st.error("Usuário ou senha inválidos.")
 
     with tab_cad:
-        st.subheader("📝 Cadastro de Novo Sócio")
-        with st.form("form_cadastro"):
+        with st.form("cad"):
             c1, c2 = st.columns(2)
-            nome = c1.text_input("Nome Completo")
-            cpf = c2.text_input("CPF")
-            emp = c1.text_input("Razão Social")
-            cnpj = c2.text_input("CNPJ")
-            senha_cad = st.text_input("Senha", type="password")
-            
-            if st.form_submit_button("Finalizar Cadastro"):
-                df_users = get_data("usuarios")
-                if cpf in df_users['cpf'].values:
-                    st.error("CPF já cadastrado.")
+            n = c1.text_input("Nome")
+            c = c2.text_input("CPF (Login)")
+            e = c1.text_input("Empresa")
+            cj = c2.text_input("CNPJ")
+            s = st.text_input("Senha", type="password")
+            if st.form_submit_button("Cadastrar"):
+                df_u = get_data("usuarios")
+                if c in df_u['cpf'].astype(str).values:
+                    st.error("CPF já existe.")
                 else:
-                    new_user = pd.DataFrame([{"nome": nome, "cpf": cpf, "empresa": emp, "cnpj": cnpj, "senha": senha_cad, "tipo": "socio"}])
-                    updated_users = pd.concat([df_users, new_user], ignore_index=True)
-                    conn.update(worksheet="usuarios", data=updated_users)
-                    st.success("Cadastrado! Faça login.")
+                    new_u = pd.DataFrame([{"nome": n, "cpf": c, "empresa": e, "cnpj": cj, "senha": s, "tipo": "socio"}])
+                    conn.update(worksheet="usuarios", data=pd.concat([df_u, new_u], ignore_index=True))
+                    st.success("Cadastrado! Use a aba de login.")
 
 elif st.session_state.user_type == "admin":
-    st.sidebar.title("Painel ADM")
-    st.sidebar.write("Olá, **Gabriel**")
-    if st.sidebar.button("Sair"):
-        st.session_state.logado = False
-        st.rerun()
-
-    st.header("📊 Relatório de Retiradas")
-    df_lanc = get_data("lancamentos")
-    df_users = get_data("usuarios")
+    # --- ÁREA ADM (GABRIEL) ---
+    st.sidebar.button("Sair", on_click=lambda: st.session_state.update({"logado": False}))
+    st.header("📊 Painel ADM - Gabriel")
     
-    # Cruzamento de dados para o relatório do Gabriel
-    if not df_lanc.empty:
-        df_final = df_lanc.merge(df_users, left_on='cpf_socio', right_on='cpf')
-        st.dataframe(df_final[['nome', 'empresa', 'data', 'valor', 'banco']], use_container_width=True)
-        st.metric("Total Distribuído", f"R$ {df_final['valor'].sum():,.2f}")
+    df_l = get_data("lancamentos")
+    df_u = get_data("usuarios")
+    
+    if not df_l.empty and not df_u.empty:
+        df_u['cpf'] = df_u['cpf'].astype(str)
+        df_l['cpf_socio'] = df_l['cpf_socio'].astype(str)
+        df_res = df_l.merge(df_u, left_on='cpf_socio', right_on='cpf')
         
-        st.divider()
-        st.subheader("🔐 Resetar Senha")
-        user_sel = st.selectbox("Sócio:", df_users['nome'].unique())
-        if st.button("Resetar para 'abcd1234'"):
-            df_users.loc[df_users['nome'] == user_sel, 'senha'] = "abcd1234"
-            conn.update(worksheet="usuarios", data=df_users)
-            st.success("Senha resetada!")
+        socio_f = st.multiselect("Filtrar Sócio", df_res['nome'].unique())
+        if socio_f: df_res = df_res[df_res['nome'].isin(socio_f)]
+        
+        st.dataframe(df_res[['nome', 'empresa', 'data', 'valor', 'banco']], use_container_width=True)
+        st.metric("Total GERAL", f"R$ {df_res['valor'].sum():,.2f}")
     else:
-        st.info("Nenhum lançamento encontrado.")
+        st.info("Sem dados para exibir.")
+
+    st.divider()
+    st.subheader("🔧 Reset de Senha")
+    if not df_u.empty:
+        u_reset = st.selectbox("Sócio:", df_u['nome'].unique())
+        if st.button("Resetar p/ abcd1234"):
+            df_u.loc[df_u['nome'] == u_reset, 'senha'] = "abcd1234"
+            conn.update(worksheet="usuarios", data=df_u)
+            st.success("Senha resetada!")
 
 else:
     # --- ÁREA DO SÓCIO ---
-    st.sidebar.write(f"Sócio: {st.session_state.user_cpf}")
-    if st.sidebar.button("Sair"):
-        st.session_state.logado = False
-        st.rerun()
-
+    st.sidebar.button("Sair", on_click=lambda: st.session_state.update({"logado": False}))
     st.header("💸 Lançar Retirada")
-    df_bancos = get_data("bancos")
     
-    with st.form("form_retirada"):
-        data_ret = st.date_input("Data", datetime.now())
-        valor_ret = st.number_input("Valor (R$)", min_value=0.0)
-        banco_sel = st.selectbox("Banco PJ:", ["Novo..."] + list(df_bancos['nome_banco'].unique()))
-        novo_banco = st.text_input("Se novo, qual?")
+    df_b = get_data("bancos")
+    with st.form("ret"):
+        data_v = st.date_input("Data", datetime.now())
+        valor_v = st.number_input("Valor", min_value=0.0)
+        b_sel = st.selectbox("Banco PJ", ["Novo..."] + list(df_b['nome_banco'].unique()))
+        b_novo = st.text_input("Qual o novo banco?")
         
-        if st.form_submit_button("Registrar"):
-            b_final = novo_banco.upper() if banco_sel == "Novo..." else banco_sel
-            
-            # Atualiza lista de bancos se for novo
-            if banco_sel == "Novo..." and novo_banco:
-                new_b = pd.DataFrame([{"nome_banco": b_final}])
-                conn.update(worksheet="bancos", data=pd.concat([df_bancos, new_b]))
-
-            # Salva o lançamento
-            df_lanc = get_data("lancamentos")
-            new_l = pd.DataFrame([{"cpf_socio": st.session_state.user_cpf, "data": data_ret.strftime("%d/%m/%Y"), "valor": valor_ret, "banco": b_final}])
-            conn.update(worksheet="lancamentos", data=pd.concat([df_lanc, new_l]))
-            st.success("Lançamento concluído!")
+        if st.form_submit_button("Lançar"):
+            b_final = b_novo.upper() if b_sel == "Novo..." else b_sel
+            if b_final and valor_v > 0:
+                # Salvar banco se for novo
+                if b_sel == "Novo...":
+                    new_b = pd.DataFrame([{"nome_banco": b_final}])
+                    conn.update(worksheet="bancos", data=pd.concat([df_b, new_b]).drop_duplicates())
+                
+                # Salvar lançamento
+                df_l = get_data("lancamentos")
+                new_l = pd.DataFrame([{"cpf_socio": st.session_state.user_cpf, "data": data_v.strftime("%d/%m/%Y"), "valor": valor_v, "banco": b_final}])
+                conn.update(worksheet="lancamentos", data=pd.concat([df_l, new_l], ignore_index=True))
+                st.success("Lançado!")
