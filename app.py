@@ -9,15 +9,14 @@ st.set_page_config(page_title="Gestão de Lucros - Gabriel", layout="wide", page
 DB_FILE = "dados_sistema.db"
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS usuarios 
-                 (nome TEXT, cpf TEXT PRIMARY KEY, empresa TEXT, cnpj TEXT, senha TEXT, tipo TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS lancamentos 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, cpf_socio TEXT, data DATE, valor REAL, banco TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS bancos (nome_banco TEXT PRIMARY KEY)''')
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(DB_FILE) as conn:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS usuarios 
+                     (nome TEXT, cpf TEXT PRIMARY KEY, empresa TEXT, cnpj TEXT, senha TEXT, tipo TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS lancamentos 
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, cpf_socio TEXT, data TEXT, valor REAL, banco TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS bancos (nome_banco TEXT PRIMARY KEY)''')
+        conn.commit()
 
 init_db()
 
@@ -70,32 +69,34 @@ elif st.session_state.user_type == "admin":
     st.sidebar.button("Sair", on_click=lambda: st.session_state.update({'logado': False}))
     st.header("📊 Painel Geral de Retiradas")
     
-    # Busca dados completos para o ADM
     query_adm = """
         SELECT u.cpf, u.cnpj, u.nome, u.empresa, l.data, l.valor, l.banco 
         FROM lancamentos l 
         JOIN usuarios u ON l.cpf_socio = u.cpf
     """
     df_adm = pd.read_sql_query(query_adm, sqlite3.connect(DB_FILE))
-    df_adm['data'] = pd.to_datetime(df_adm['data']).dt.date
+    
+    if not df_adm.empty:
+        # Tratamento robusto de datas para evitar o ValueError
+        df_adm['data'] = pd.to_datetime(df_adm['data'], errors='coerce').dt.date
+        df_adm = df_adm.dropna(subset=['data']) # Remove registros com data inválida
 
-    # --- FILTROS ADM ---
-    with st.expander("🔍 Filtros de Relatório", expanded=True):
-        col1, col2, col3 = st.columns(3)
-        f_cpf = col1.text_input("Filtrar por CPF")
-        f_cnpj = col2.text_input("Filtrar por CNPJ")
-        
-        periodo = col3.date_input("Período", [date.today().replace(day=1), date.today()])
+        with st.expander("🔍 Filtros de Relatório", expanded=True):
+            col1, col2, col3 = st.columns(3)
+            f_cpf = col1.text_input("Filtrar por CPF")
+            f_cnpj = col2.text_input("Filtrar por CNPJ")
+            periodo = col3.date_input("Período", [date.today().replace(day=1), date.today()])
 
-    # Aplicação dos Filtros
-    if f_cpf: df_adm = df_adm[df_adm['cpf'].str.contains(f_cpf)]
-    if f_cnpj: df_adm = df_adm[df_cnpj.str.contains(f_cnpj)]
-    if len(periodo) == 2:
-        df_adm = df_adm[(df_adm['data'] >= periodo[0]) & (df_adm['data'] <= periodo[1])]
+        # Aplicação dos Filtros
+        if f_cpf: df_adm = df_adm[df_adm['cpf'].astype(str).str.contains(f_cpf)]
+        if f_cnpj: df_adm = df_adm[df_adm['cnpj'].astype(str).str.contains(f_cnpj)]
+        if len(periodo) == 2:
+            df_adm = df_adm[(df_adm['data'] >= periodo[0]) & (df_adm['data'] <= periodo[1])]
 
-    # Exibição ADM
-    st.dataframe(df_adm, use_container_width=True)
-    st.metric("Total Distribuído no Período", f"R$ {df_adm['valor'].sum():,.2f}")
+        st.dataframe(df_adm, use_container_width=True)
+        st.metric("Total Distribuído no Período", f"R$ {df_adm['valor'].sum():,.2f}")
+    else:
+        st.info("Nenhum lançamento registrado.")
 
 else:
     # --- ÁREA DO SÓCIO ---
@@ -119,18 +120,20 @@ else:
                     try: run_query("INSERT INTO bancos VALUES (?)", (final_b,))
                     except: pass
                 
+                # Salva no formato ISO para facilitar filtros (YYYY-MM-DD)
                 run_query("INSERT INTO lancamentos (cpf_socio, data, valor, banco) VALUES (?,?,?,?)",
-                          (st.session_state.user_cpf, dt.isoformat(), vl, final_b))
+                          (st.session_state.user_cpf, dt.strftime('%Y-%m-%d'), vl, final_b))
                 st.success("Lançamento realizado!")
                 st.rerun()
 
     st.divider()
-    st.subheader("📜 Meus Lançamentos Realizados")
-    # Busca apenas os lançamentos deste sócio
+    st.subheader("📜 Meu Histórico de Retiradas")
     query_socio = "SELECT data, valor, banco FROM lancamentos WHERE cpf_socio=? ORDER BY data DESC"
     df_socio = pd.read_sql_query(query_socio, sqlite3.connect(DB_FILE), params=(st.session_state.user_cpf,))
+    
     if not df_socio.empty:
-        df_socio['data'] = pd.to_datetime(df_socio['data']).dt.strftime('%d/%m/%Y')
+        # Tratamento seguro de exibição de data para o sócio
+        df_socio['data'] = pd.to_datetime(df_socio['data'], errors='coerce').dt.strftime('%d/%m/%Y')
         st.table(df_socio)
         st.metric("Minha Retirada Total", f"R$ {df_socio['valor'].sum():,.2f}")
     else:
