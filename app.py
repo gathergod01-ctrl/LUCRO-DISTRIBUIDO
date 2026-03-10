@@ -1,27 +1,39 @@
 import streamlit as st
 import pandas as pd
-from streamlit_gsheets import GSheetsConnection
+import sqlite3
+import os
 from datetime import datetime
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Gestão de Lucros - Gabriel", layout="wide", page_icon="💰")
 
-# --- CONEXÃO COM GOOGLE SHEETS ---
-conn = st.connection("gsheets", type=GSheetsConnection)
+# --- BANCO DE DADOS LOCAL (SIMPLES E DIRETO) ---
+DB_FILE = "dados_sistema.db"
 
-def get_data(worksheet_name):
-    try:
-        df = conn.read(worksheet=worksheet_name, ttl=0)
-        # Limpeza de nomes de colunas (removendo caracteres das imagens anteriores)
-        df.columns = df.columns.str.replace(':', '').str.replace(',', '').str.strip()
-        return df
-    except:
-        cols = {
-            "usuarios": ["nome", "cpf", "empresa", "cnpj", "senha", "tipo"],
-            "lancamentos": ["cpf_socio", "data", "valor", "banco"],
-            "bancos": ["nome_banco"]
-        }
-        return pd.DataFrame(columns=cols.get(worksheet_name, []))
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    # Tabela de Usuários
+    c.execute('''CREATE TABLE IF NOT EXISTS usuarios 
+                 (nome TEXT, cpf TEXT PRIMARY KEY, empresa TEXT, cnpj TEXT, senha TEXT, tipo TEXT)''')
+    # Tabela de Lançamentos
+    c.execute('''CREATE TABLE IF NOT EXISTS lancamentos 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, cpf_socio TEXT, data TEXT, valor REAL, banco TEXT)''')
+    # Tabela de Bancos
+    c.execute('''CREATE TABLE IF NOT EXISTS bancos (nome_banco TEXT PRIMARY KEY)''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# --- FUNÇÕES DE ACESSO ---
+def run_query(query, params=(), fetch=False):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        if fetch:
+            return cursor.fetchall()
+        conn.commit()
 
 # --- LÓGICA DE SESSÃO ---
 if 'logado' not in st.session_state:
@@ -40,15 +52,12 @@ if not st.session_state.logado:
                 st.session_state.update({'logado': True, 'user_type': 'admin'})
                 st.rerun()
             else:
-                df_u = get_data("usuarios")
-                if not df_u.empty:
-                    df_u['cpf'] = df_u['cpf'].astype(str)
-                    df_u['senha'] = df_u['senha'].astype(str)
-                    user = df_u[(df_u['cpf'] == u_in) & (df_u['senha'] == p_in)]
-                    if not user.empty:
-                        st.session_state.update({'logado': True, 'user_type': 'socio', 'user_cpf': u_in})
-                        st.rerun()
-                st.error("Credenciais inválidas.")
+                user = run_query("SELECT tipo, cpf FROM usuarios WHERE cpf=? AND senha=?", (u_in, p_in), fetch=True)
+                if user:
+                    st.session_state.update({'logado': True, 'user_type': user[0][0], 'user_cpf': user[0][1]})
+                    st.rerun()
+                else:
+                    st.error("Usuário ou senha inválidos.")
 
     with t_cad:
         with st.form("form_cad"):
@@ -57,53 +66,59 @@ if not st.session_state.logado:
             e = st.text_input("Empresa")
             cj = st.text_input("CNPJ")
             s = st.text_input("Senha", type="password")
-            if st.form_submit_button("Cadastrar Sócio"):
-                df_u = get_data("usuarios")
-                # Garante que as colunas existam antes de concatenar
-                new_row = pd.DataFrame([{"nome": n, "cpf": str(c), "empresa": e, "cnpj": cj, "senha": str(s), "tipo": "socio"}])
-                df_updated = pd.concat([df_u, new_row], ignore_index=True)
-                # O método update precisa encontrar as colunas exatas
-                conn.update(worksheet="usuarios", data=df_updated)
-                st.success("Cadastrado com sucesso! Volte para a aba de login.")
+            if st.form_submit_button("Finalizar Cadastro"):
+                try:
+                    run_query("INSERT INTO usuarios VALUES (?,?,?,?,?,?)", (n, c, e, cj, s, 'socio'))
+                    st.success("Cadastrado! Vá para a aba de Login.")
+                except:
+                    st.error("Erro: CPF já cadastrado.")
 
 elif st.session_state.user_type == "admin":
     st.sidebar.button("Sair", on_click=lambda: st.session_state.update({'logado': False}))
     st.header("📊 Painel ADM - Gabriel")
     
-    df_l = get_data("lancamentos")
-    df_u = get_data("usuarios")
+    # Query de Relatório
+    df_res = pd.read_sql_query("""
+        SELECT u.nome, u.empresa, l.data, l.valor, l.banco 
+        FROM lancamentos l JOIN usuarios u ON l.cpf_socio = u.cpf
+    """, sqlite3.connect(DB_FILE))
     
-    if not df_l.empty and not df_u.empty:
-        df_l['cpf_socio'] = df_l['cpf_socio'].astype(str)
-        df_u['cpf'] = df_u['cpf'].astype(str)
-        df_res = df_l.merge(df_u, left_on='cpf_socio', right_on='cpf')
-        st.dataframe(df_res[['nome', 'empresa', 'data', 'valor', 'banco']], use_container_width=True)
+    if not df_res.empty:
+        st.dataframe(df_res, use_container_width=True)
         st.metric("Total Acumulado", f"R$ {df_res['valor'].sum():,.2f}")
     else:
-        st.info("Aguardando lançamentos.")
+        st.info("Nenhum lançamento registrado.")
+
+    st.divider()
+    st.subheader("🔐 Gestão de Sócios")
+    df_u = pd.read_sql_query("SELECT nome, cpf FROM usuarios", sqlite3.connect(DB_FILE))
+    if not df_u.empty:
+        u_sel = st.selectbox("Sócio:", df_u['nome'].tolist())
+        if st.button("Resetar Senha para abcd1234"):
+            run_query("UPDATE usuarios SET senha='abcd1234' WHERE nome=?", (u_sel,))
+            st.success(f"Senha de {u_sel} resetada!")
 
 else:
     # --- ÁREA DO SÓCIO ---
     st.sidebar.button("Sair", on_click=lambda: st.session_state.update({'logado': False}))
     st.header("💸 Registrar Retirada")
-    df_b = get_data("bancos")
+    
+    bancos_db = run_query("SELECT nome_banco FROM bancos", fetch=True)
+    lista_bancos = ["Novo..."] + [b[0] for b in bancos_db]
     
     with st.form("form_ret"):
         dt = st.date_input("Data", datetime.now())
         vl = st.number_input("Valor", min_value=0.0)
-        b_list = ["Novo..."] + list(df_b['nome_banco'].unique()) if not df_b.empty else ["Novo..."]
-        b_sel = st.selectbox("Banco PJ", b_list)
+        b_sel = st.selectbox("Banco PJ", lista_bancos)
         b_new = st.text_input("Se novo, qual?")
         
         if st.form_submit_button("Lançar"):
             final_b = b_new.upper() if b_sel == "Novo..." else b_sel
-            # Salvar novo banco
-            if b_sel == "Novo..." and b_new:
-                new_b_df = pd.DataFrame([{"nome_banco": final_b}])
-                conn.update(worksheet="bancos", data=pd.concat([df_b, new_b_df]).drop_duplicates())
-            
-            # Salvar lançamento
-            df_l = get_data("lancamentos")
-            new_l_df = pd.DataFrame([{"cpf_socio": str(st.session_state.user_cpf), "data": dt.strftime("%d/%m/%Y"), "valor": vl, "banco": final_b}])
-            conn.update(worksheet="lancamentos", data=pd.concat([df_l, new_l_df], ignore_index=True))
-            st.success("Lançamento realizado!")
+            if final_b and vl > 0:
+                if b_sel == "Novo...":
+                    try: run_query("INSERT INTO bancos VALUES (?)", (final_b,))
+                    except: pass
+                
+                run_query("INSERT INTO lancamentos (cpf_socio, data, valor, banco) VALUES (?,?,?,?)",
+                          (st.session_state.user_cpf, dt.strftime("%d/%m/%Y"), vl, final_b))
+                st.success("Lançado com sucesso!")
